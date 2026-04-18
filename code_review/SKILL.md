@@ -78,7 +78,30 @@ superior modern approach exists. When recommending a departure, say so explicitl
 
 ---
 
-## Step 2 — Review Lenses
+## Step 2 — Three-Pass Review Process
+
+Before applying the lenses below, work through the code in three passes. This prevents premature
+conclusions and ensures you review your own comments before the submitter sees them.
+
+**Pass 1 — Line by line.** Read each file and changed line carefully. Note potential issues as
+you go: naming, correctness, patterns that look off. Don't filter yourself yet — just collect.
+If something is unclear, leave a placeholder question rather than assuming; the next pass may
+answer it.
+
+**Pass 2 — Big picture.** Step back and look at how the changes fit together. Do you understand
+how all the changed files relate to each other? Does the architecture make sense at this scope?
+Are there interactions between components that weren't obvious line by line? This is the right
+moment to evaluate lenses that require systemic thinking — domain model integrity, reliability
+boundaries, security posture across the whole change.
+
+**Pass 3 — Review your own comments.** Before submitting, re-read every comment from the
+submitter's perspective. Is each one clear? Is the severity label right? Did you back every
+suggestion with a reason? Did a later finding answer a question you flagged earlier? This pass
+is where you catch tone problems, redundant comments, and findings you can consolidate or drop.
+
+---
+
+## Step 3 — Review Lenses
 
 Work through each lens. Not all apply to every PR — use judgment.
 
@@ -99,6 +122,13 @@ Read `references/domain-model.md` for the full checklist. Key signals to watch f
   inside a transaction.
 - **Bounded contexts** — Direct instantiation of classes from another bounded context without an
   anti-corruption layer is a boundary violation.
+
+**When to comment vs. when to escalate:** Boundary violations and cross-cutting architectural
+concerns are often too large to resolve inside a PR review thread. If a finding touches the
+fundamental design of the system — not just this specific change — flag it with `needs rework:`
+and suggest moving the conversation offline (a design doc, Slack, or a dedicated meeting).
+Blocking a PR on an architectural debate the team hasn't had yet is unfair to the submitter and
+unlikely to produce a good outcome in a comment thread.
 
 ---
 
@@ -253,9 +283,16 @@ language-specific patterns. Critical checks inline:
 - Public APIs and complex logic documented appropriately for this codebase?
 - If a new feature: is user-facing documentation updated?
 
+**Formatting and style:**
+Code review is not the place for formatting preferences — that's what linters and formatters
+are for (ESLint, Prettier, Black, gofmt, rustfmt, etc.). If the repo has a formatter configured,
+these issues should already be caught in CI before the review even starts. If they aren't, the
+fix is to configure the tool, not to leave comments. Reserve your attention for things automation
+cannot catch.
+
 ---
 
-## Step 3 — Visual Validation (Web Applications)
+## Step 4 — Visual Validation (Web Applications)
 
 If the change touches a web application accessible in a browser and browser tools are available:
 
@@ -270,7 +307,7 @@ Include specific observations (and screenshots if possible) in the review report
 
 ---
 
-## Step 4 — Write Your Comments
+## Step 5 — Write Your Comments
 
 Structure every finding using a severity label followed by the **Triple-R pattern**:
 **Request** (what to do) → **Rationale** (why, with references) → **Result** (what done looks like).
@@ -291,7 +328,7 @@ MMG Exchange for resolving disagreements, and MoSCoW / Conventional Comments alt
 
 ---
 
-## Step 5 — Produce the Review Report
+## Step 6 — Produce the Review Report
 
 ```
 ## Code Review
