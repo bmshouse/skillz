@@ -78,7 +78,54 @@ superior modern approach exists. When recommending a departure, say so explicitl
 
 ---
 
-## Step 2 — Three-Pass Review Process
+## Step 2 — Scope Drift Detection
+
+Before reviewing any code, verify the diff actually does what was asked — nothing more,
+nothing less. This step is **informational**: findings don't block the review, but they
+are reported first so the submitter can address them before iterating on the detail feedback.
+
+**1. Identify stated intent.**
+
+Gather the stated intent from whichever sources are available:
+- PR description (`gh pr view --json body --jq .body 2>/dev/null` or equivalent)
+- Commit messages (`git log <base>..HEAD --oneline`)
+- `TODOS.md` or a linked ticket if present
+
+Summarise the intent in one sentence. If none of these sources exist, note that and skip
+to Step 3 — there is nothing to compare against.
+
+**2. Identify what the diff actually does.**
+
+Run `git diff <base>...HEAD --stat` and scan the changed file list. What areas of the
+codebase are touched? What is the net effect?
+
+**3. Compare and classify.**
+
+| Finding | Definition |
+|---------|------------|
+| **SCOPE CREEP** | Files or behaviour changed that are unrelated to the stated intent — "while I was in there" changes that expand blast radius without being asked for |
+| **REQUIREMENTS MISSING** | Items from the PR description, ticket, or TODOS.md that the diff does not address — partial implementations or stated acceptance criteria not met |
+| **CLEAN** | Diff matches stated intent; nothing missing, nothing extra |
+
+**4. Output before the main review begins:**
+
+```
+Scope Check: [CLEAN / SCOPE CREEP / REQUIREMENTS MISSING / BOTH]
+Intent:    <one sentence — what was asked for>
+Delivered: <one sentence — what the diff actually does>
+
+Scope creep:
+- <file or behaviour> — unrelated to stated intent because <reason>
+
+Requirements missing:
+- <requirement from PR/ticket/TODOS> — not addressed in the diff
+```
+
+Omit sections that don't apply. If CLEAN, a single line is sufficient.
+
+---
+
+## Step 3 — Three-Pass Review Process
 
 Before applying the lenses below, work through the code in three passes. This prevents premature
 conclusions and ensures you review your own comments before the submitter sees them.
@@ -101,7 +148,29 @@ is where you catch tone problems, redundant comments, and findings you can conso
 
 ---
 
-## Step 3 — Review Lenses
+## Step 4 — Parallel Specialist Dispatch
+
+Spawn the following specialist agents in parallel using the Agent tool. Give each agent the
+same diff and a reference to its checklist file. Collect their findings before writing the
+final report.
+
+**Testing checklist** (`references/testing.md`) — always run.
+Checks for: negative-path test gaps, edge-case coverage (zero/null/boundary/Unicode), test
+isolation violations, flaky patterns, and missing security enforcement tests.
+
+**Red-team checklist** (`references/red-team.md`) — run when diff > 200 lines, or when
+significant security or reliability findings were identified during the lens review.
+Adversarial analysis: attacking the happy path under load/concurrency, hunting silent failures,
+exploiting trust assumptions, breaking edge cases, and finding cross-category issues the other
+lenses missed.
+
+Each specialist returns a numbered findings list with severity and suggested fix, or a
+"no issues found" statement. Incorporate their output into the appropriate severity buckets
+(🔴 Blockers, 🟡 Should Fix, 🔵 Consider) in the final report.
+
+---
+
+## Step 5 — Review Lenses
 
 Work through each lens. Not all apply to every PR — use judgment.
 
@@ -261,6 +330,12 @@ language-specific patterns. Critical checks inline:
 - Are there edge cases or failure modes the author seems to have missed?
 - Are error handling patterns consistent with the rest of the codebase?
 - Off-by-one errors, unhandled null/undefined/nil values, incorrect type assumptions?
+- **Enum and value completeness** — when a new enum value, status string, tier name, or type
+  constant is introduced: (1) trace it through *every* consumer — don't just grep, read each
+  file that switches on, filters by, or displays that value; (2) check `case`/`switch`/`if-elsif`
+  chains for unhandled fall-through to a wrong default; (3) check allowlists and arrays of
+  sibling values (e.g., `%w[active pending]`) to verify the new value is included where needed.
+  A new value in a frontend dropdown that the backend doesn't handle is a 🔴 blocker.
 
 **Readability and maintainability:**
 - Can you understand this code on a cold read? Sections requiring re-reading need a comment or rename.
@@ -275,9 +350,21 @@ language-specific patterns. Critical checks inline:
 - If departing from existing patterns: is it justified by a meaningful improvement?
 
 **Tests:**
+
+See `references/testing.md` for the full testing checklist (applied in Step 4). Key signals
+to flag inline during the main review:
+
 - New behaviors covered by tests? Bug fixes accompanied by regression tests?
 - Tests verify meaningful behavior, not just implementation details?
 - Test names descriptive enough to understand what's being verified without reading the body?
+- **Negative paths** — guard clauses, early returns, error branches, and auth-denied cases all
+  have corresponding tests, not just the happy path.
+- **Edge cases** — zero, null/nil/undefined, empty collections, single-element collections, and
+  maximum-size inputs tested where the code touches these boundaries.
+- **Isolation** — tests do not share mutable state, depend on execution order, or make real
+  network calls without stubs.
+- **Security enforcement** — auth checks have a test for the unauthorized case; input
+  sanitization tested with malicious or boundary input.
 
 **Documentation:**
 - Public APIs and complex logic documented appropriately for this codebase?
@@ -292,7 +379,59 @@ cannot catch.
 
 ---
 
-## Step 4 — Visual Validation (Web Applications)
+### Lens 7 — LLM Output Trust Boundary
+*Applies when: the code uses an LLM to generate values that are then stored, acted upon, or
+forwarded to other systems.*
+
+LLM outputs are untrusted data. An LLM can hallucinate emails, URLs, IDs, and structured
+values that look plausible but are invalid, malformed, or adversarially shaped via prompt
+injection. Treat LLM output at system boundaries exactly as you treat user input.
+
+- **Data written to storage** — 🔴 LLM-generated emails, URLs, names, or IDs written to a
+  database or cache without format validation are a blocker. Add lightweight guards (regex,
+  `URI.parse`, `.strip`, length caps) before persisting.
+- **Structured output accepted without shape checks** — tool call results, JSON payloads, or
+  array outputs used downstream without type/shape validation. A missing field or wrong type
+  causes silent data corruption.
+- **LLM-generated URLs fetched** — fetching a URL from LLM output without an allowlist is an
+  SSRF risk: the model can be manipulated into producing an internal network address. Validate
+  the hostname against a blocklist or explicit allowlist before any outbound HTTP call.
+- **Stored prompt injection** — LLM outputs written to a knowledge base, vector DB, or document
+  store can contain instructions that execute when retrieved in a future prompt. Sanitize or
+  isolate any LLM content written to retrieval stores.
+- **`eval()` / `exec()` on LLM-generated code** — 🔴 a blocker without sandboxing. LLMs
+  regularly produce plausible-looking code that contains escapes or shell commands.
+- **Prompt content logged or stored** — prompts that include user data or secrets written to
+  application logs create a sensitive-data exposure risk.
+
+---
+
+## Do Not Flag
+
+These items produce noise without actionable value. Skip them during the review.
+
+- **Harmless redundancy** — code that is technically redundant but aids readability. Flag only
+  when the redundancy introduces a real maintenance or correctness risk.
+- **"Add a comment explaining this threshold/constant"** — tuning values change constantly during
+  calibration; comments rot immediately. Flag only when the value is a non-obvious invariant (a
+  legal requirement, a hardware limit, a wire-protocol constant).
+- **"This assertion could be tighter"** — when the test already covers the behavior being
+  verified, a marginally tighter assertion is noise, not signal.
+- **Purely consistency-driven cosmetic changes** — suggesting a style change only to match a
+  pattern elsewhere, when both patterns are valid and the repo has no linter rule for it.
+- **"Regex doesn't handle edge case X"** — when the input is constrained by upstream validation
+  and X provably never occurs in practice.
+- **"Test exercises multiple guards simultaneously"** — tests do not need to isolate every
+  guard. Combined coverage is fine and often more realistic.
+- **Magic numbers that are empirical tuning values** — "explain why this is 42" when 42 is
+  a calibration constant changed weekly. Reserve for values that encode hidden invariants.
+- **Anything already fixed later in the same diff** — read the full diff before commenting. If
+  the author corrected an issue in a later hunk, do not flag the earlier hunk.
+- **Formatting preferences** — if a formatter is configured, these belong in CI, not in review.
+
+---
+
+## Step 6 — Visual Validation (Web Applications)
 
 If the change touches a web application accessible in a browser and browser tools are available:
 
@@ -307,7 +446,7 @@ Include specific observations (and screenshots if possible) in the review report
 
 ---
 
-## Step 5 — Write Your Comments
+## Step 7 — Write Your Comments
 
 Structure every finding using a severity label followed by the **Triple-R pattern**:
 **Request** (what to do) → **Rationale** (why, with references) → **Result** (what done looks like).
@@ -328,7 +467,7 @@ MMG Exchange for resolving disagreements, and MoSCoW / Conventional Comments alt
 
 ---
 
-## Step 6 — Produce the Review Report
+## Step 8 — Produce the Review Report
 
 ```
 ## Code Review
@@ -346,6 +485,10 @@ reliability risks. Use Triple-R format with file and line references.]
 ### 🔵 Consider
 [Non-blocking suggestions worth thinking about in this or a future PR.]
 
+### Specialist Findings
+[Incorporate findings from the testing specialist and red-team specialist here, tagged with
+their source. Omit this section if both specialists returned "no issues found."]
+
 ### Visual Validation
 [Observations from browser-based testing, if applicable.]
 
@@ -361,6 +504,9 @@ reliability risks. Use Triple-R format with file and line references.]
 ### Rapid-Triage Checklist
 
 Before writing up findings, run through this mentally:
+
+**Scope** — Diff matches stated intent; no unrelated files changed; all stated requirements
+addressed; no partial implementations left open.
 
 **Domain** — Ubiquitous language used; single aggregate per transaction; value objects immutable;
 repositories load complete aggregates; domain events via outbox; bounded context boundaries respected.
@@ -378,8 +524,15 @@ AI-generated code scrutinized; threat model updated for new trust boundaries.
 state+PKCE; no hardcoded API keys or machine credentials; service accounts follow least privilege;
 session tokens invalidated server-side on logout.
 
-**Code Quality** — Logic correct and edge cases handled; code readable and consistent with repo
-conventions; DRY; tests cover new behavior; docs updated.
+**LLM Trust Boundary** — LLM-generated data validated before storage; structured output
+shape-checked; LLM-generated URLs allowlisted before fetch; no stored prompt injection risk;
+no unsandboxed eval of LLM code.
+
+**Enum Completeness** — New enum/status values traced through all consumers; case/switch chains
+handle the new value without falling through to a wrong default; sibling allowlists updated.
+
+**Code Quality** — Logic correct and edge cases handled; enum completeness verified; code
+readable and consistent with repo conventions; DRY; negative-path tests exist; docs updated.
 
 ---
 
@@ -393,3 +546,7 @@ conventions; DRY; tests cover new behavior; docs updated.
   domain events, bounded contexts, transactions
 - `references/reliability.md` — Detailed SRE checklist: observability, error handling, resilience
   patterns, deployment safety, toil reduction
+- `references/testing.md` — Testing checklist: negative-path gaps, edge-case coverage,
+  isolation violations, flaky patterns, security enforcement tests
+- `references/red-team.md` — Red-team checklist: adversarial analysis, silent failure hunting,
+  trust assumption exploitation, cross-category gap finding
